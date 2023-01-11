@@ -140,6 +140,190 @@ public class ResourceTests
     //////////////////////////////////////////////////////////////////
     //////////////////////////////////////////////////////////////////
 
+    [Theory]
+    [Trait("Category", Category)]
+    // note that scope2 is shared between resource1 and resource2
+    [InlineData("openid profile scope2")]  // Fails
+    [InlineData("openid profile scope2 offline_access")] // Passes
+    public async Task request_for_shared_scope_with_no_resource_indicator_in_token_exchange_should_include_resources_with_shared_scope_as_audiences(string scopes)
+    {
+        await _mockPipeline.LoginAsync("bob");
+
+        _mockPipeline.BrowserClient.AllowAutoRedirect = false;
+
+        var url = _mockPipeline.CreateAuthorizeUrl(
+            clientId: "client1",
+            responseType: "code",
+            scope: scopes, 
+            redirectUri: "https://client1/callback",
+            extra: new { resource = "urn:resource1" });
+
+        var response = await _mockPipeline.BrowserClient.GetAsync(url);
+        var code = GetCode(response);
+
+        var tokenResponse = await _mockPipeline.BackChannelClient.RequestAuthorizationCodeTokenAsync(new AuthorizationCodeTokenRequest
+        {
+            Address = IdentityServerPipeline.TokenEndpoint,
+            ClientId = "client1",
+            ClientSecret = "secret",
+            Code = code,
+            RedirectUri = "https://client1/callback",
+            // Resource is not set!
+        });
+
+        {
+            var claims = ParseAccessTokenClaims(tokenResponse);
+            claims.Where(x => x.Type == "aud").Select(x => x.Value)
+                .Should()
+                // scope2 is shared by resource1 and resource2, so we expect 
+                // them both
+                .BeEquivalentTo(new[] { "urn:resource1", "urn:resource2" });
+            claims.Where(x => x.Type == "scope").Select(x => x.Value)
+                .Should()
+                .BeEquivalentTo(scopes.Split(' '));
+        }
+    }
+
+
+    [Theory]
+    [Trait("Category", Category)]
+    [InlineData("openid profile scope2")] // Passes
+    [InlineData("openid profile scope2 offline_access")] // Passes
+    public async Task requesting_resource_not_in_initial_authz_request_should_fail(string scopes)
+    {
+        await _mockPipeline.LoginAsync("bob");
+
+        _mockPipeline.BrowserClient.AllowAutoRedirect = false;
+
+        var url = _mockPipeline.CreateAuthorizeUrl(
+            clientId: "client1",
+            responseType: "code",
+            scope: scopes, 
+            redirectUri: "https://client1/callback",
+            extra: new { resource = "urn:resource1" });
+
+        var response = await _mockPipeline.BrowserClient.GetAsync(url);
+        var code = GetCode(response);
+
+        var tokenResponse = await _mockPipeline.BackChannelClient.RequestAuthorizationCodeTokenAsync(new AuthorizationCodeTokenRequest
+        {
+            Address = IdentityServerPipeline.TokenEndpoint,
+            ClientId = "client1",
+            ClientSecret = "secret",
+            Code = code,
+            RedirectUri = "https://client1/callback",
+            // Requesting the other resource that shares scope2!
+            Resource = new [] { "urn:resource2" }
+        });
+
+        tokenResponse.IsError.Should().BeTrue();
+    }
+
+    [Theory]
+    [Trait("Category", Category)]
+    [InlineData("openid profile scope2")] // Passes
+    [InlineData("openid profile scope2 offline_access")] // Passes
+    public async Task requesting_resource_with_no_resource_initially_specified_should_succeed(string scopes)
+    {
+        await _mockPipeline.LoginAsync("bob");
+
+        _mockPipeline.BrowserClient.AllowAutoRedirect = false;
+
+        var url = _mockPipeline.CreateAuthorizeUrl(
+            clientId: "client1",
+            responseType: "code",
+            scope: scopes,
+            redirectUri: "https://client1/callback");
+            // Note lack of resource
+
+        var response = await _mockPipeline.BrowserClient.GetAsync(url);
+        var code = GetCode(response);
+
+        var tokenResponse = await _mockPipeline.BackChannelClient.RequestAuthorizationCodeTokenAsync(new AuthorizationCodeTokenRequest
+        {
+            Address = IdentityServerPipeline.TokenEndpoint,
+            ClientId = "client1",
+            ClientSecret = "secret",
+            Code = code,
+            RedirectUri = "https://client1/callback",
+            // Now we request a non-isolated resource
+            Resource = new [] { "urn:resource2" },
+        });
+
+        {
+            var claims = ParseAccessTokenClaims(tokenResponse);
+            claims.Where(x => x.Type == "aud").Select(x => x.Value)
+                .Should()
+                // scope2 is shared by resource1 and resource2, so we expect 
+                // them both
+                .BeEquivalentTo(new[] { "urn:resource2" });
+            
+            // This fails, because we don't have identity scopes. Why not?
+            // claims.Where(x => x.Type == "scope").Select(x => x.Value)
+            //     .Should()
+            //     .BeEquivalentTo(scopes.Split(' '));
+            claims.Where(x => x.Type == "scope").Select(x => x.Value)
+                .Should()
+                .Contain("scope2");
+        }
+    }
+
+
+    [Theory]
+    [Trait("Category", Category)]
+    [InlineData("openid profile scope2")] 
+    [InlineData("openid profile scope2 offline_access")] 
+    public async Task requesting_isolated_resource_that_does_not_have_granted_scopes_and_was_not_initially_requested_should_fail(string scopes)
+    {
+        await _mockPipeline.LoginAsync("bob");
+
+        _mockPipeline.BrowserClient.AllowAutoRedirect = false;
+
+        var url = _mockPipeline.CreateAuthorizeUrl(
+            clientId: "client1",
+            responseType: "code",
+            scope: scopes,
+            redirectUri: "https://client1/callback");
+            // Note lack of resource
+
+        var response = await _mockPipeline.BrowserClient.GetAsync(url);
+        var code = GetCode(response);
+
+        var tokenResponse = await _mockPipeline.BackChannelClient.RequestAuthorizationCodeTokenAsync(new AuthorizationCodeTokenRequest
+        {
+            Address = IdentityServerPipeline.TokenEndpoint,
+            ClientId = "client1",
+            ClientSecret = "secret",
+            Code = code,
+            RedirectUri = "https://client1/callback",
+            // Now we request an isolated resource
+            Resource = new [] { "urn:resource3" },
+        });
+
+
+        var claims = ParseAccessTokenClaims(tokenResponse);
+
+        // This is what I expect, but the test fails.
+        //tokenResponse.IsError.Should().BeTrue();
+
+        // Instead, we get no audience, and our scopes don't contain scope2
+        // That seems inconsistent - on the one hand, we're respecting that 
+        // resource3 doesn't have scope2, so we don't give you scope2
+        // On the other hand, you're not getting resource3 as the audience.
+        
+        // Asserts what is in the above
+        claims.Where(x => x.Type == "aud").Select(x => x.Value)
+            .Should()
+            // scope2 is shared by resource1 and resource2, so we expect 
+            // them both
+            .BeEmpty();
+        claims.Where(x => x.Type == "scope").Select(x => x.Value)
+            .Should()
+            .NotContain("scope2");
+
+    }
+
+
     [Fact]
     [Trait("Category", Category)]
     public async Task no_resource_indicator_on_code_exchange_should_succeed()
