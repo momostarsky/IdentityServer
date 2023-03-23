@@ -60,7 +60,10 @@ public class GenericHost
             builder.Environment.ApplicationName = HostAssembly.GetName().Name ?? "";
         }
 
-        ConfigureServices(builder.Services);
+        #pragma warning disable ASP0012
+        builder.WebHost.ConfigureServices(ConfigureServices);
+        #pragma warning restore ASP0012
+
         var app = builder.Build();
         ConfigureApp(app);
 
